@@ -14,6 +14,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { fileURLToPath } from "url";
+import { readFile } from 'fs/promises';
+import { URL } from 'url';
 
 // Configuration
 dotenv.config();
@@ -63,28 +65,59 @@ async function findNodePath() {
 const HANDLERS = {
   getApiOverview: async (request) => {
     const { id } = request.params.arguments;
-
     log("Executing getApiOverview for API:", id);
 
     try {
-      // Fetch from oapis.org/overview endpoint
-      const url = `https://oapis.org/overview/${encodeURIComponent(id)}`;
-      log("SLOP API request URL:", url);
+      let responseContent;
 
-      const response = await fetch(url);
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`SLOP API error: ${error}`);
+      // 判断是否为本地文件
+      if (id.startsWith("file://")) {
+        // 读取本地文件
+        const filePath = new URL(id);
+        responseContent = await readFile(filePath, "utf-8");
+      } else if (
+        id.startsWith("/") || // 绝对路径
+        /^[a-zA-Z]:\\/.test(id) // Windows 绝对路径
+      ) {
+        responseContent = await readFile(id, "utf-8");
+      } else if (
+        id.startsWith("http://") ||
+        id.startsWith("https://")
+      ) {
+        // 判断是否为内网地址
+        const urlObj = new URL(id);
+        const isPrivate =
+          urlObj.hostname.startsWith("192.168.") ||
+          urlObj.hostname.startsWith("10.") ||
+          urlObj.hostname.startsWith("172.16.") ||
+          urlObj.hostname === "localhost" ||
+          urlObj.hostname === "127.0.0.1";
+        if (isPrivate) {
+          // 直接 fetch 内网地址
+          const response = await fetch(id);
+          if (!response.ok) {
+            throw new Error(`Fetch error: ${await response.text()}`);
+          }
+          responseContent = await response.text();
+        } else {
+          // 走 oapis.org
+          const url = `https://oapis.org/overview/${encodeURIComponent(id)}`;
+          log("SLOP API request URL:", url);
+          const response = await fetch(url);
+          if (!response.ok) {
+            const error = await response.text();
+            throw new Error(`SLOP API error: ${error}`);
+          }
+          responseContent = await response.text();
+        }
+      } else {
+        throw new Error("不支持的 id 格式，请传入 file://、绝对路径或 http(s) 地址");
       }
 
-      // Get response
-      let responseContent = await response.text();
-
       const tooBig = responseContent.length > 250000;
-
       if (tooBig) {
         throw new Error(
-          `The SLOP found is too large to process with this MCP. Please try a different OpenAPI.`,
+          `The OpenAPI file is too large to process with this MCP. Please try a smaller OpenAPI.`
         );
       }
       return {
@@ -92,7 +125,7 @@ const HANDLERS = {
         metadata: {},
       };
     } catch (error) {
-      log("Error handling SLOP API overview request:", error);
+      log("Error handling getApiOverview request:", error);
       return {
         content: [
           {
